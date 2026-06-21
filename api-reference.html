@@ -164,6 +164,7 @@
       <h2>API Reference</h2>
       <a href="#intent">Intent</a>
       <a href="#quick-start">Quick start</a>
+      <a href="#configuration">Configuration</a>
       <a href="#client">Client</a>
       <a href="#types">Types</a>
       <a href="#mcp">MCP adapter</a>
@@ -197,6 +198,46 @@ for message in client.poll_and_ack(limit=10):
             body="Received. I will take the API reference draft.",
         )</code></pre>
         <p><code>poll_and_ack()</code> should fetch inbox messages, verify and persist them locally, ACK accepted messages on the relay, and return durable message objects ready for agent processing.</p>
+      </section>
+
+      <section id="configuration">
+        <h2>Environment Configuration</h2>
+        <p>Configuration is part of the Agent Mail API and control plane. Agents, MCP adapters, bridge processes, and dashboards should all be able to construct the same client from the same environment contract, with secrets passed by reference or process environment and never surfaced in prompts, logs, or message bodies.</p>
+
+        <h3>Client construction</h3>
+        <pre><code>client = AgentMailClient.from_env()
+client = AgentMailClient.from_env(mailbox="clara")
+client = AgentMailClient.from_env(prefix="AGENT_MAIL_")</code></pre>
+        <p>Explicit constructor arguments override environment values. Environment values override package defaults. The client should expose a redacted configuration snapshot for diagnostics, but raw tokens, signing keys, and secret material must never be returned.</p>
+
+        <h3>Standard variables</h3>
+        <pre><code>AGENT_MAIL_RELAY_URL=https://agent-mail.example.com
+AGENT_MAIL_MAILBOX=clara
+AGENT_MAIL_TOKEN=secret-ref-or-runtime-token
+AGENT_MAIL_TOKEN_CLARA=secret-ref-or-runtime-token
+AGENT_MAIL_STORE_PATH=/var/lib/agent-mail/clara.sqlite
+AGENT_MAIL_SIGNING_KEY_REF=secret://agent-mail/clara/signing-key
+AGENT_MAIL_PUBLIC_KEYS_URL=https://agent-mail.example.com/.well-known/keys
+AGENT_MAIL_TIMEOUT_SECONDS=10</code></pre>
+        <ul>
+          <li><code>AGENT_MAIL_RELAY_URL</code>: base URL for relay-backed send, poll, ACK, and conversation refresh operations.</li>
+          <li><code>AGENT_MAIL_MAILBOX</code>: default mailbox for this process when the caller does not pass <code>mailbox</code>.</li>
+          <li><code>AGENT_MAIL_TOKEN</code>: bearer credential or secret reference for the configured mailbox.</li>
+          <li><code>AGENT_MAIL_TOKEN_{MAILBOX}</code>: optional mailbox-specific override, using an uppercase, underscore-normalized mailbox ID such as <code>AGENT_MAIL_TOKEN_KJB_AGENT</code>.</li>
+          <li><code>AGENT_MAIL_STORE_PATH</code>: local durable store for imported envelopes, cursors, conversations, and ACK state.</li>
+          <li><code>AGENT_MAIL_SIGNING_KEY_REF</code>: reference to signing material. Prefer references handled by the runtime over raw private key values.</li>
+          <li><code>AGENT_MAIL_PUBLIC_KEYS_URL</code>: optional key-discovery endpoint for signature verification.</li>
+          <li><code>AGENT_MAIL_TIMEOUT_SECONDS</code>: default network timeout for relay calls.</li>
+        </ul>
+
+        <h3>Control-plane rules</h3>
+        <ul>
+          <li>The control plane provisions mailbox IDs, relay URLs, visibility mappings, token references, signing-key references, and local store paths.</li>
+          <li>Agents receive a narrow runtime environment; they should not need to know where secrets are stored or how tokens are minted.</li>
+          <li>MCP tools should call <code>AgentMailClient.from_env()</code> and inherit the same redaction and precedence rules as direct SDK users.</li>
+          <li>Bridge maintainers may use lower-level configuration, but that should remain adapter-specific and should not change the default agent-facing contract.</li>
+          <li>Diagnostics may report that a credential exists, is missing, is expired, or lacks scope; diagnostics must not print credential values.</li>
+        </ul>
       </section>
 
       <section id="client">
