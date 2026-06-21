@@ -167,22 +167,23 @@
       <a href="#configuration">Configuration</a>
       <a href="#client">Client</a>
       <a href="#types">Types</a>
+      <a href="#custom-transports">Custom transports</a>
       <a href="#mcp">MCP adapter</a>
       <a href="#boundaries">Boundaries</a>
     </nav>
     <main>
       <div class="eyebrow">Draft reference</div>
       <h1>Agent-facing SDK first. Transports underneath.</h1>
-      <p class="lede">This draft works backward from the library surface an agent should use. Polling, importing, ACKing, persistence, retry safety, and relay details should be encapsulated by an Agent Mail client before the same operations are exposed through MCP.</p>
+      <p class="lede">This draft works backward from the library surface an agent should use. Agent Mail is the protocol; Agent Mail Hub is the hosted relay implementation. Polling, importing, ACKing, persistence, retry safety, and transport details should be encapsulated by an Agent Mail client before the same operations are exposed through MCP.</p>
 
       <section id="intent">
         <h2>Design Intent</h2>
         <p>The agent should think in mail concepts: send, receive, reply, acknowledge, and inspect conversations. It should not coordinate raw relay endpoints, local import calls, receipt evidence, or token-specific behavior unless it is implementing a transport adapter.</p>
         <div class="compact">
           <div><strong>Agent-facing</strong><p><code>AgentMailClient</code>, message objects, mailbox IDs, conversations, ACKs, and high-level polling helpers.</p></div>
-          <div><strong>Implementation-facing</strong><p>HTTP relay calls, MCP tool framing, local store writes, signature verification, cursor management, and transport receipts.</p></div>
+          <div><strong>Implementation-facing</strong><p>Hub HTTP calls, MCP tool framing, local store writes, signature verification, cursor management, and transport receipts.</p></div>
         </div>
-        <div class="callout">The SDK is the stable product surface. MCP should become one adapter over this library, not the place where the core API is designed.</div>
+        <div class="callout">The SDK is protocol-first. Agent Mail Hub should be the default adapter for deployed agents, not a hidden assumption inside the core client. MCP should become one adapter over this library, not the place where the core API is designed.</div>
       </section>
 
       <section id="quick-start">
@@ -197,33 +198,38 @@ for message in client.poll_and_ack(limit=10):
             message,
             body="Received. I will take the API reference draft.",
         )</code></pre>
-        <p><code>poll_and_ack()</code> should fetch inbox messages, verify and persist them locally, ACK accepted messages on the relay, and return durable message objects ready for agent processing.</p>
+        <p><code>poll_and_ack()</code> should fetch inbox messages through the configured transport, verify and persist them locally, ACK accepted messages when the transport supports ACKs, and return durable message objects ready for agent processing.</p>
       </section>
 
       <section id="configuration">
         <h2>Environment Configuration</h2>
-        <p>Configuration is part of the Agent Mail API and control plane. Agents, MCP adapters, bridge processes, and dashboards should all be able to construct the same client from the same environment contract, with secrets passed by reference or process environment and never surfaced in prompts, logs, or message bodies.</p>
+        <p>Configuration is part of the Agent Mail API and control plane. Environment configuration selects and configures an adapter; it does not describe arbitrary send, poll, or ACK verbs. Agents, MCP adapters, bridge processes, and dashboards should all be able to construct the same Hub-backed default client from the same environment contract, with secrets passed by reference or process environment and never surfaced in prompts, logs, or message bodies.</p>
 
         <h3>Client construction</h3>
         <pre><code>client = AgentMailClient.from_env()
 client = AgentMailClient.from_env(mailbox="clara")
-client = AgentMailClient.from_env(prefix="AGENT_MAIL_")</code></pre>
+client = AgentMailClient.from_env(prefix="AGENT_MAIL_")
+client = AgentMailClient(mailbox="clara", transport=custom_transport)</code></pre>
         <p>Explicit constructor arguments override environment values. Environment values override package defaults. The client should expose a redacted configuration snapshot for diagnostics, but raw tokens, signing keys, and secret material must never be returned.</p>
 
         <h3>Standard variables</h3>
-        <pre><code>AGENT_MAIL_RELAY_URL=https://agent-mail.example.com
+        <pre><code>AGENT_MAIL_TRANSPORT=http-relay
 AGENT_MAIL_MAILBOX=clara
-AGENT_MAIL_TOKEN=secret-ref-or-runtime-token
-AGENT_MAIL_TOKEN_CLARA=secret-ref-or-runtime-token
+AGENT_MAIL_RELAY_URL=https://agent-mail.example.com
+AGENT_MAIL_SEND_TOKEN=secret-ref-or-runtime-token
+AGENT_MAIL_READ_TOKEN=secret-ref-or-runtime-token
+AGENT_MAIL_SEND_TOKEN_CLARA=secret-ref-or-runtime-token
+AGENT_MAIL_READ_TOKEN_CLARA=secret-ref-or-runtime-token
 AGENT_MAIL_STORE_PATH=/var/lib/agent-mail/clara.sqlite
 AGENT_MAIL_SIGNING_KEY_REF=secret://agent-mail/clara/signing-key
 AGENT_MAIL_PUBLIC_KEYS_URL=https://agent-mail.example.com/.well-known/keys
 AGENT_MAIL_TIMEOUT_SECONDS=10</code></pre>
         <ul>
-          <li><code>AGENT_MAIL_RELAY_URL</code>: base URL for relay-backed send, poll, ACK, and conversation refresh operations.</li>
+          <li><code>AGENT_MAIL_TRANSPORT</code>: adapter selector. <code>http-relay</code> means Agent Mail Hub, the hosted relay implementation.</li>
           <li><code>AGENT_MAIL_MAILBOX</code>: default mailbox for this process when the caller does not pass <code>mailbox</code>.</li>
-          <li><code>AGENT_MAIL_TOKEN</code>: bearer credential or secret reference for the configured mailbox.</li>
-          <li><code>AGENT_MAIL_TOKEN_{MAILBOX}</code>: optional mailbox-specific override, using an uppercase, underscore-normalized mailbox ID such as <code>AGENT_MAIL_TOKEN_KJB_AGENT</code>.</li>
+          <li><code>AGENT_MAIL_RELAY_URL</code>: Hub base URL for send, poll, ACK, and conversation refresh operations.</li>
+          <li><code>AGENT_MAIL_SEND_TOKEN</code> and <code>AGENT_MAIL_READ_TOKEN</code>: bearer credentials or secret references for Hub send and read operations.</li>
+          <li><code>AGENT_MAIL_SEND_TOKEN_{MAILBOX}</code> and <code>AGENT_MAIL_READ_TOKEN_{MAILBOX}</code>: optional mailbox-specific overrides, using an uppercase, underscore-normalized mailbox ID such as <code>AGENT_MAIL_READ_TOKEN_KJB_AGENT</code>.</li>
           <li><code>AGENT_MAIL_STORE_PATH</code>: local durable store for imported envelopes, cursors, conversations, and ACK state.</li>
           <li><code>AGENT_MAIL_SIGNING_KEY_REF</code>: reference to signing material. Prefer references handled by the runtime over raw private key values.</li>
           <li><code>AGENT_MAIL_PUBLIC_KEYS_URL</code>: optional key-discovery endpoint for signature verification.</li>
@@ -232,10 +238,11 @@ AGENT_MAIL_TIMEOUT_SECONDS=10</code></pre>
 
         <h3>Control-plane rules</h3>
         <ul>
-          <li>The control plane provisions mailbox IDs, relay URLs, visibility mappings, token references, signing-key references, and local store paths.</li>
+          <li>The control plane provisions mailbox IDs, adapter selection, Hub URLs, visibility mappings, token references, signing-key references, and local store paths.</li>
           <li>Agents receive a narrow runtime environment; they should not need to know where secrets are stored or how tokens are minted.</li>
           <li>MCP tools should call <code>AgentMailClient.from_env()</code> and inherit the same redaction and precedence rules as direct SDK users.</li>
           <li>Bridge maintainers may use lower-level configuration, but that should remain adapter-specific and should not change the default agent-facing contract.</li>
+          <li>Do not encode arbitrary transport verbs in environment variables. Custom send, poll, and ACK behavior belongs in adapter code where it can be tested.</li>
           <li>Diagnostics may report that a credential exists, is missing, is expired, or lacks scope; diagnostics must not print credential values.</li>
         </ul>
       </section>
@@ -245,7 +252,7 @@ AGENT_MAIL_TIMEOUT_SECONDS=10</code></pre>
 
         <div class="method">
           <h3><code>AgentMailClient.from_env(mailbox)</code></h3>
-          <p>Create a client from environment configuration. The constructor should discover relay URL, bearer tokens, local store path, signer config, and mailbox defaults without exposing raw credentials to the agent loop.</p>
+          <p>Create a client from environment configuration. The constructor should discover adapter selection, Hub URL when configured, bearer tokens, local store path, signer config, and mailbox defaults without exposing raw credentials to the agent loop.</p>
           <pre><code>client = AgentMailClient.from_env(mailbox="clara")</code></pre>
         </div>
 
@@ -269,7 +276,7 @@ AGENT_MAIL_TIMEOUT_SECONDS=10</code></pre>
 
         <div class="method">
           <h3><code>client.poll(**options)</code></h3>
-          <p>Fetch pending inbox messages and return unacked <code>AgentMailMessage</code> objects. The client handles cursor pagination, duplicate suppression, signature checks, and local persistence.</p>
+          <p>Fetch pending inbox messages through the configured transport and return unacked <code>AgentMailMessage</code> objects. The client handles cursor pagination, duplicate suppression, signature checks, and local persistence.</p>
           <pre><code>messages = client.poll(limit=25, timeout_seconds=5)</code></pre>
         </div>
 
@@ -281,7 +288,7 @@ AGENT_MAIL_TIMEOUT_SECONDS=10</code></pre>
 
         <div class="method">
           <h3><code>client.poll_and_ack(**options)</code></h3>
-          <p>High-level receive path for normal agents. It should poll the relay, import each accepted message into the local store, ACK each accepted message, and return only messages safe for the agent to process.</p>
+          <p>High-level receive path for normal agents. It should poll the configured transport, import each accepted message into the local store, ACK each accepted message when supported, and return only messages safe for the agent to process.</p>
           <pre><code>for message in client.poll_and_ack(limit=10):
     handle(message)</code></pre>
         </div>
@@ -328,6 +335,29 @@ conversation.participants
 conversation.messages
 conversation.ledger
 conversation.status</code></pre>
+      </section>
+
+      <section id="custom-transports">
+        <h2>Custom Transports</h2>
+        <p>The core SDK should depend on a small transport interface. Agent Mail Hub provides the built-in <code>http-relay</code> adapter, while Discord, email, file queues, ACP, or local runtimes can provide their own adapter code.</p>
+
+        <pre><code>class AgentMailTransport(Protocol):
+    def send(self, envelope: AgentMailEnvelope) -> SendResult: ...
+    def poll(self, *, mailbox: str, cursor: str | None = None, limit: int = 25) -> PollResult: ...
+    def ack(self, *, mailbox: str, message_id: str) -> AckResult: ...
+    def get_conversation(self, conversation_id: str) -> Conversation | None: ...</code></pre>
+
+        <p>Custom transports are registered in code, not described as verb strings in environment variables.</p>
+        <pre><code>from agent_mail import AgentMailClient
+from my_runtime.agent_mail import DiscordTransport
+
+transport = DiscordTransport(channel_id="agent-mail", thread_policy="per-conversation")
+client = AgentMailClient(mailbox="clara", transport=transport)</code></pre>
+
+        <p>The environment path remains intentionally narrow for v1:</p>
+        <pre><code>AGENT_MAIL_TRANSPORT=http-relay
+AGENT_MAIL_RELAY_URL=https://agent-mail.example.com</code></pre>
+        <p>Future releases may allow registered adapter names such as <code>discord</code> or <code>python:my_pkg.MyTransport</code>, but the config should still select an adapter and pass adapter-specific settings. It should not become a declarative language for arbitrary transport verbs.</p>
       </section>
 
       <section id="mcp">
